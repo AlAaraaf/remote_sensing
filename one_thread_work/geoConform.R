@@ -622,36 +622,3 @@ extract.result(res3)
 extract.result(res4)
 extract.result(res5)
 extract.result(res6)
-
-
-y = rnorm(500,0,1)
-s = abs(y-mean(y))
-hist(s, xlab = "scores", main = "Histogram of scores", xlim = c(0,4))
-text(2, 190, expression(delta[i] ==abs(Y[i]-bar(Y))))
-points(x = 0.75, y=0, pch = 4, col = "blue", lwd = 5)
-points(x = 3.75, y= 0, pch = 4, col ="red", lwd = 5)
-text(1, 60,  "Less than 62% of scores", col = "blue")
-text(3, 60, "Less than 4% of scores", col = "red")
-
-for(i in 1:length(res6)){
-  res = res6[[i]]
-  if(min(res$res.inter$smoothing)<0.09){
-    print(i)
-  }
-}
-
-res = res6[[98]]
-View(res$res[res$res$a.cov==0,])
-
-res = res1[[71]]
-View(res$res[res$res$a.cov==0,])
-
-res = res1[[86]]
-View(res$res[res$res$a.cov==0,])
-
-X.false = c()
-for(i in 1:length(res1)){
-  res = res1[[i]]$res
-  x = res$x[res$a.cov==0]
-  X.false = c(X.false,x)
-}

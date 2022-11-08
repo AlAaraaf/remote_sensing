@@ -57,21 +57,26 @@ sub_region_vecchia = function(dat1, knots, pars, K){
   M = nrow(knots)
   
   ord = order_maxmin_exact(dat1[,1:2])
+  cut = min(n, 9)
+  ord = c(ord[1], ord[-seq(1, cut)], ord[2:cut])
   dat1 = dat1[ord,]
   dat.aug  = rbind(knots, dat1)
+  NNarray = GpGp::find_ordered_nn(dat1[, 1:2], K) + M
   
   log.vecchia = sapply((M+1):(M+n), function(i){
-    loglik_cond(dat.aug, i, pars, M, K)})
+    loglik_cond(dat.aug, i, pars, M, NNarray)})
   
   sum(log.vecchia)
 }
 
 
 
-loglik_cond = function(dat.aug, pt, pars,M, K){
+loglik_cond = function(dat.aug, pt, pars, M, NNarray){
   # dat.aug -- the knot data matrix and whole  sub region data matrix
   # pt -- the index to calculate conditional density on
   # pars -- parameters
+  # M -- number of knots
+  # NNarray -- matrix giving the nearest neighbors
   sigmasq = pars[1]
   phi = pars[2]
   kappa = pars[3]
@@ -81,7 +86,10 @@ loglik_cond = function(dat.aug, pt, pars,M, K){
   if(pt == M+1){
     cond.set = 1:M
   }else{
-    cond.set = c(1:M, max(M+1, pt-K):(pt-1))
+    # cond.set = c(1:M, max(M+1, pt-K):(pt-1)) wrong code
+    # find the K nearest neighbors subject to the ordering
+    cond.set = c(1:M, NNarray[pt-M, -1])
+    cond.set = cond.set[!is.na(cond.set)]
   }
   S11 = sigmasq + tausq
   D12 = dist2(t(dat.aug[pt, 1:2]), dat.aug[cond.set, 1:2])
@@ -165,7 +173,7 @@ ng_loglik = function(pars, dat){
   phi = pars[2]
   kappa = pars[3]
   tausq = pars[4]
-  if(nrow(dat)<10000){
+  if(nrow(dat)<=10000){
     D = dist1(as.matrix(dat[, 1:2]))
     V = MaternFun(D, c(sigmasq, phi, kappa)) + tausq*diag(rep(1, nrow(D)))
     -1*loglik(dat[,3], V)
@@ -211,22 +219,63 @@ krigeSimCE1 = function (formula, data, newdata, model, n = 1, ext = 2)
   newdata = addAttrToGeom(newdata, as.data.frame(sims))
 }
 
-st_generator = function(loc, pars, method = c("seq", "CE"), tr = 1){
+st_generator = function(loc, pars, method = c("seq", "CE"), tr = 1, plot  = FALSE){
   sigmasq = pars[1]
   phi = pars[2]
   kappa = pars[3]
   tausq = pars[4]
   modVgm = vgm(sigmasq, "Mat", phi, tausq, kappa = kappa)
   if(method == "CE"){
+    x = unique(loc[,1])
+    y = unique(loc[,2])
+    grid = make.surface.grid(list(x,y))
     gridded(loc) = ~x+y
-    unconSim = krigeSimCE1(z~1, newdata = loc, model = modVgm, n=tr)
+    unconSim = krigeSimCE1(z~1, newdata = loc, model = modVgm, n=tr)[[1]]
+    if(plot) image.plot(as.surface(grid, unconSim))
   }else{
     coordinates(loc) = ~x+y
     g.dummy = gstat(formula = z~1, dummy = TRUE, beta = 0,
                      model = modVgm, nmax = 50)
-    unconSim = predict(g.dummy, loc, nsim = tr)
+    unconSim = predict(g.dummy, loc, nsim = tr)[[1]]
   }
+  
   return(unconSim)
+}
+
+sigmafn  = function(loc){
+  5*(loc[1]^2+loc[2]^2+1)
+}
+
+taufn = function(loc){
+  0.2*(loc[1]+1)
+}
+
+nst_generator = function(loc, pars, sigmafn, taufn, method = c("seq", "CE"), tr = 1,plot  = FALSE){
+  phi = pars[1]
+  kappa = pars[2]
+  modVgm = vgm(psill = 1, "Mat", phi, nugget = 0, kappa = kappa)
+  sigma = apply(loc, 1, sigmafn)
+  tau = apply(loc, 1, taufn)
+  n = nrow(loc)
+  if(method == "CE"){
+    x = unique(loc[,1])
+    y = unique(loc[,2])
+    grid = make.surface.grid(list(x,y))
+    gridded(loc) = ~x+y
+    unconSim = krigeSimCE1(z~1, newdata = loc, model = modVgm, n=tr)[[1]]*sigma
+    rand_error = rnorm(n, 0, 1)*tau
+    z = unconSim + rand_error
+    if(plot) image.plot(as.surface(grid, z))
+  }else{
+    coordinates(loc) = ~x+y
+    g.dummy = gstat(formula = z~1, dummy = TRUE, beta = 0,
+                    model = modVgm, nmax = 50)
+    unconSim = predict(g.dummy, loc, nsim = tr)[[1]]*sigma
+    rand_error = rnorm(n, 0, 1)*tau
+    z = unconSim + rand_error
+  }
+  
+  return(z)
 }
 
 predict.surfaceGrid<- function(object,x){
@@ -273,6 +322,7 @@ lk_generator = function(x, y, kappa, tausq){
   return(z)
 }
 
+
 sim = function(N, m, K, pars){
   sigmasq = pars[1]
   phi = pars[2]
@@ -286,7 +336,6 @@ sim = function(N, m, K, pars){
   n = N*N
   
   z = st_generator(coords, pars, method = "CE", tr = 1)
-  z = z[[1]]
   dat = cbind(as.matrix(coords), z)
   
   # Using fields pkg:
@@ -299,56 +348,84 @@ sim = function(N, m, K, pars){
   coordinates(z.g) = ~x+y
   v.sample = gstat::variogram(data~1, z.g)
   v = mean(tail(v.sample)$gamma)
-  r0 = max(v.sample$dist)/3
+  r0 = max(v.sample$dist)/10
+  
+  
   # our vecchia
-  loglik_true_mr = loglik_mr(pars, dat, m, K)
-  # pars_mr = optim(par = c(v/2, r0, 1, v/2), fn = ng_loglik_mr,
-  #                dat = dat, m = m, K = K,
-  #                method = "L-BFGS-B",
-  #                lower = c(v/10, r0/10, 0.1, v/10),
-  #                upper = c(v*100, r0*10, 10, v*10 ))
+  # loglik_true_mr = loglik_mr(pars, dat, m, K)
+  time.mr = Sys.time()
+  pars_mr = optim(par = c(1, 0.1, 0.2, 0.1), fn = ng_loglik_mr,
+                 dat = dat, m = m, K = K,
+                 method = "L-BFGS-B",
+                 lower = c(0.1, 0.001, 0.05, 0.001),
+                 upper = c(50, 1, 10, 5),
+                 control = list(trace = 6))
+  time.mr = Sys.time() - time.mr
   
-  # GPvecchia pkg
-  vecchia.approx = vecchia_specify(dat[,1:2], m = K, ordering = "maxmin", conditioning = "NN")
-  loglik_true_gp = vecchia_likelihood(dat[,3], vecchia.approx, covparms = pars[1:3], nuggets = pars[4])
+  # GPvecchia pkg, conditioning on both latent and obs
+  time.gp = Sys.time()
+  vecchia.approx = vecchia_specify(dat[,1:2], m = K, ordering = "maxmin",
+                                   cond.yz = "SGV", conditioning = "NN")
+  # loglik_true_gp = vecchia_likelihood(dat[,3], vecchia.approx, 
+  #                                     covparms = pars[1:3], nuggets = pars[4])
   
-  # pars_gp = optim(par = c(v/2, r0, 1, v/2), fn = ng_loglik_gp,  
-  #                 dat = dat, vecchia.approx = vecchia.approx, 
-  #                 method = "L-BFGS-B", 
-  #                 lower = c(v/10, r0/10, 0.1, v/10), 
-  #                 upper = c(v*100, r0*10, 10, v*10 ))
+  # GPvecchia pkg, conditioning only on obs
+  # vecchia.approx1 = vecchia_specify(dat[,1:2], m = K, ordering = "maxmin", 
+  #                                  cond.yz = "z", conditioning = "NN")
+  # loglik_true_gp1 = vecchia_likelihood(dat[,3], vecchia.approx1, 
+  #                                     covparms = pars[1:3], nuggets = pars[4])
+  
+  pars_gp = optim(par = c(1, 0.1, 0.2, 0.1), fn = ng_loglik_gp,
+                  dat = dat, vecchia.approx = vecchia.approx,
+                  method = "L-BFGS-B",
+                  lower = c(0.1, 0.001, 0.05, 0.001),
+                  upper = c(50, 1, 10, 5),
+                  control = list(trace = 6))
+  time.gp = Sys.time() - time.gp
   
   # out conservative method
-  loglik_true_cons = loglik_cons(pars, dat, m, K) 
-  # pars_cons = optim(par = c(v/2, r0, 1, v/2), fn = ng_loglik_cons,
-  #                 dat = dat, m = m, K = K,
-  #                 method = "L-BFGS-B",
-  #                 lower = c(v/10, r0/10, 0.1, v/10),
-  #                 upper = c(v*100, r0*10, 10, v*10 ))
+  # loglik_true_cons = loglik_cons(pars, dat, m, K) 
+  time.cons = Sys.time()
+  pars_cons = optim(par = c(1, 0.1, 0.2, 0.1), fn = ng_loglik_cons,
+                    dat = dat, m = m, K = K,
+                    method = "L-BFGS-B",
+                    lower = c(0.1, 0.001, 0.05, 0.001),
+                    upper = c(50, 1, 10, 5))
+  time.cons = Sys.time() - time.cons
   
   #true likelihood
-  if(n < 10000){
-    D = dist1(as.matrix(coords))
-    V = MaternFun(D, c(sigmasq, phi, kappa)) + tausq*diag(rep(1, nrow(D)))
-    loglik_true = loglik(z, V)
-  }else{
-    loglik_true = loglik_cons(pars, dat, m = 10, K = 40) 
-  }
-  
-  # if(n < 5000){
-  #   pars_mle = optim(par = c(v/2, r0, 1, v/2), fn = ng_loglik,
-  #                   dat = dat, 
-  #                   method = "L-BFGS-B",
-  #                   lower = c(v/10, r0/10, 0.1, v/10),
-  #                   upper = c(v*100, r0*10, 10, v*10 ))
+  # if(n <= 10000){
+  #   D = dist1(as.matrix(coords))
+  #   V = MaternFun(D, c(sigmasq, phi, kappa)) + tausq*diag(rep(1, nrow(D)))
+  #   loglik_true = loglik(z, V)
+  # }else{
+  #   loglik_true = loglik_cons(pars, dat, m = 10, K = 40) 
   # }
-  
-  reletive_loglik = c(loglik_true_mr/loglik_true, 
-                      loglik_true_cons/loglik_true,
-                      loglik_true_gp/loglik_true)
-  #bias_mr = pars_mr$par - pars
-  #bias_gp = pars_gp$par - pars
-  return(reletive_loglik)
+  time.mle = Sys.time()
+  if(n < 5000){
+    pars_mle = optim(par = c(1, 0.1, 0.2, 0.1), fn = ng_loglik,
+                    dat = dat,
+                    method = "L-BFGS-B",
+                    lower = c(0.1, 0.001, 0.05, 0.001),
+                    upper = c(50, 1, 10, 5))
+  }else{
+    pars_mle = optim(par = c(1, 0.1, 0.2, 0.1), fn = ng_loglik_cons,
+                     dat = dat, m = m, K = K,
+                     method = "L-BFGS-B",
+                     lower = c(0.1, 0.001, 0.05, 0.001),
+                     upper = c(50, 1, 10, 5))
+  }
+  time.mle = Sys.time() - time.mle
+  # reletive_loglik = c(loglik_true_mr/loglik_true, 
+  #                     loglik_true_cons/loglik_true,
+  #                     loglik_true_gp/loglik_true,
+  #                     loglik_true_gp1/loglik_true)
+  bias_mr = abs((pars_mr$par - pars)/pars)
+  bias_gp = abs((pars_gp$par - pars)/pars)
+  bias_cons = abs((pars_cons$par - pars)/pars)
+  bias_mle = abs((pars_mle$par - pars)/pars)
+  return(c(bias_mr, bias_gp, bias_cons, bias_mle, 
+           time.mr, time.gp, time.cons, time.mle))
 }
 
 num.core = detectCores()
@@ -356,21 +433,128 @@ num.core = detectCores()
 sigmasq = 10
 kappa = 2.25
 tausq = 0.25
-m = 5
+m = 3
 K = 10
-for(N in c(50, 100, 150)){
-  res1 = list()
-  res2 = list()
-  res3 = list()
-  for(i in 1:5){
-    res1 = append(res1, sim(N, m, K, pars = c(sigmasq, 0.025, kappa, tausq)))
-    
-  }
-
+for(N in c(50, 100)){
+    res1 = mclapply(1:20, function(i){sim(N, m, K, pars = c(sigmasq, 0.025, kappa, tausq))}, mc.cores = num.core)
+    res2 = mclapply(1:20, function(i){sim(N, m, K, pars = c(sigmasq, 0.05, kappa, tausq))}, mc.cores = num.core)
+    res3 = mclapply(1:20, function(i){sim(N, m, K, pars = c(sigmasq, 0.1, kappa, tausq))}, mc.cores = num.core)
 
   save.image(paste0("v", N, ".RData"))
-
+  
 }
 
+# res.plot = function(res, N, phi){
+#   res = matrix(unlist(res), nrow = 20, byrow = TRUE)
+#   boxplot.matrix(res[,c(1,5,9,13)], main = paste("percent bias on psill",
+#                                                "N = ", N,
+#                                                "range = ", phi, sep = " "))
+#   boxplot.matrix(res[,c(2,6,10,14)], main = paste("percent bias on range",
+#                                                 "N = ", N,
+#                                                 "range = ", phi, sep = " "))
+#   boxplot.matrix(res[,c(3,7,11,15)], main = paste("percent bias on smooth",
+#                                                 "N = ", N,
+#                                                 "range = ", phi, sep = " "))
+#   boxplot.matrix(res[,c(4,8,12,16)], main = paste("percent bias on nugget",
+#                                                 "N = ", N,
+#                                                 "range = ", phi, sep = " "))
+#   boxplot.matrix(res[,17:20], main = paste("time",
+#                                             "N = ", N,
+#                                             "range = ", phi, sep = " "))
+# }
+
+res.plot = function(res, N, phi){
+  res = matrix(unlist(res), nrow = 20, byrow = TRUE)
+  boxplot.matrix(res[,c(1,5,9)], main = paste("percent bias on psill",
+                                                 "N = ", N,
+                                                 "range = ", phi, sep = " "))
+  boxplot.matrix(res[,c(2,6,10)], main = paste("percent bias on range",
+                                                  "N = ", N,
+                                                  "range = ", phi, sep = " "))
+  boxplot.matrix(res[,c(3,7,11)], main = paste("percent bias on smooth",
+                                                  "N = ", N,
+                                                  "range = ", phi, sep = " "))
+  boxplot.matrix(res[,c(4,8,12)], main = paste("percent bias on nugget",
+                                                  "N = ", N,
+                                                  "range = ", phi, sep = " "))
+  boxplot.matrix(res[,13:15], main = paste("time",
+                                           "N = ", N,
+                                           "range = ", phi, sep = " "))
+}
+
+res.plot(res1, N, 0.025)
+res.plot(res2, N, 0.05)
+res.plot(res3, N, 0.1)
+
+
+pars = c(10, 0.025, 2.25, 0.25)
+N = 30
+x = (1:N)/N
+y = (1:N)/N
+coords = expand.grid(x, y)
+names(coords) = c("x", "y")
+n = N*N
+z = st_generator(coords, pars, method = "CE", tr = 1)
+dat = cbind(as.matrix(coords), z)
+
+psill.seq = seq(5, 15, by = 0.2)
+range.seq = seq(0.01, 0.1, by = 0.00075)
+smooth.seq = seq(1, 3, by = 0.1)
+nugget.seq = seq(0.05, 2, by = 0.0225)
+vecchia.approx = vecchia_specify(dat[,1:2], m = 10, ordering = "maxmin",
+                                 cond.yz = "SGV", conditioning = "NN")
   
 
+par(mfrow = c(1,1))
+plot(psill.seq, sapply(psill.seq, function(x){
+  loglik_mr(pars = c(x, 0.025, 2.25, 0.25), dat, m = 3, K = 10)
+}), type = "l", ylab = "loglik", ylim = c(-960, -920))
+lines(psill.seq, sapply(psill.seq, function(x){
+  -1*ng_loglik(pars = c(x, 0.025, 2.25, 0.25), dat)
+}), col = "red")
+lines(psill.seq, sapply(psill.seq, function(x){
+   vecchia_likelihood(dat[,3], vecchia.approx, 
+                      covparms = c(x, 0.025, 2.25), nuggets = 0.25)}), col = "blue")
+
+plot(range.seq, sapply(range.seq, function(x){
+  loglik_mr(pars = c(10, x, 2.25, 0.25), dat, m = 3, K = 10)
+}), type = "l", ylab = "loglik", ylim = c(-1300, -920))
+lines(range.seq, sapply(range.seq, function(x){
+  -1*ng_loglik(pars = c(10, x, 2.25, 0.25), dat)
+}), col = "red")
+lines(range.seq, sapply(range.seq, function(x){
+  vecchia_likelihood(dat[,3], vecchia.approx, 
+                     covparms = c(10, x, 2.25), nuggets = 0.25)}), col = "blue")
+
+plot(smooth.seq, sapply(smooth.seq, function(x){
+  loglik_mr(pars = c(10, 0.025, x, 0.25), dat, m = 3, K = 10)
+}), type = "l", ylab = "loglik", ylim = c(-960, -920))
+lines(smooth.seq, sapply(smooth.seq, function(x){
+  -1*ng_loglik(pars = c(10, 0.025, x, 0.25), dat)
+}), col = "red")
+lines(smooth.seq, sapply(smooth.seq, function(x){
+  vecchia_likelihood(dat[,3], vecchia.approx, 
+                     covparms = c(10, 0.025, x), nuggets = 0.25)}), col = "blue")
+
+plot(nugget.seq, sapply(nugget.seq, function(x){
+  loglik_mr(pars = c(10, 0.025, 2.25, x), dat, m = 3, K = 10)
+}), type = "l", ylab = "loglik", ylim = c(-960, -920))
+lines(nugget.seq, sapply(nugget.seq, function(x){
+  -1*ng_loglik(pars = c(10, 0.025, 2.25, x), dat)
+}), col = "red")
+lines(nugget.seq, sapply(nugget.seq, function(x){
+  vecchia_likelihood(dat[,3], vecchia.approx, 
+                     covparms = c(10, 0.025, 2.25), nuggets = x)}), col = "blue")
+
+# ratio.res = matrix(ncol = 4, nrow = 0)
+# res1 = unlist(res1)
+# res1 = matrix(res1, ncol = 4, byrow = TRUE)
+# ratio.res = rbind(ratio.res, res1)
+# res2 = unlist(res2)
+# res2 = matrix(res2, ncol = 4, byrow = TRUE)
+# ratio.res = rbind(ratio.res, res2)
+# res3 = unlist(res3)
+# res3 = matrix(res3, ncol = 4, byrow = TRUE)
+# ratio.res = rbind(ratio.res, res3)
+
+#boxplot.matrix(ratio.res, main = "ratio of loglik / loglik_true")

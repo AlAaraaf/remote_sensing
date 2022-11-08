@@ -61,6 +61,7 @@ sub_region_vecchia = function(dat1, knots, pars, K){
   ord = c(ord[1], ord[-seq(1, cut)], ord[2:cut])
   dat1 = dat1[ord,]
   dat.aug  = rbind(knots, dat1)
+  set.seed(123)
   NNarray = GpGp::find_ordered_nn(dat1[, 1:2], K) + M
   
   log.vecchia = sapply((M+1):(M+n), function(i){
@@ -435,6 +436,7 @@ kappa = 2.25
 tausq = 0.25
 m = 3
 K = 10
+set.seed(10723)
 for(N in c(50, 100)){
     res1 = mclapply(1:20, function(i){sim(N, m, K, pars = c(sigmasq, 0.025, kappa, tausq))}, mc.cores = num.core)
     res2 = mclapply(1:20, function(i){sim(N, m, K, pars = c(sigmasq, 0.05, kappa, tausq))}, mc.cores = num.core)

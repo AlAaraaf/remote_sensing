@@ -61,6 +61,8 @@ sub_region_vecchia = function(dat1, knots, pars, K){
   ord = c(ord[1], ord[-seq(1, cut)], ord[2:cut])
   dat1 = dat1[ord,]
   dat.aug  = rbind(knots, dat1)
+  old = ifelse(exists(".Random.seed"), .Random.seed, NULL)
+  on.exit({.Random.seed <<- old})
   set.seed(123)
   NNarray = GpGp::find_ordered_nn(dat1[, 1:2], K) + M
   
